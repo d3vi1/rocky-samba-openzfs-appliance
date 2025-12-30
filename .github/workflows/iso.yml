@@ -1,0 +1,27 @@
+name: Build ISO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build image
+        env:
+          IMAGE_NAME: ghcr.io/d3vi1/rocky-samba-openzfs-appliance
+          IMAGE_TAG: ${{ github.sha }}
+        run: make build
+      - name: Generate ISO
+        env:
+          IMAGE_NAME: ghcr.io/d3vi1/rocky-samba-openzfs-appliance
+          IMAGE_TAG: ${{ github.sha }}
+        run: make iso
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootc-iso
+          path: artifacts/*.iso

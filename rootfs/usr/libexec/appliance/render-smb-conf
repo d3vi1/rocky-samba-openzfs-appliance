@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="${1:-/etc/appliance/config.yml}"
+
+python3 - <<'PY'
+import yaml
+from pathlib import Path
+cfg = yaml.safe_load(Path("/etc/appliance/config.yml").read_text()) or {}
+if len(__import__('sys').argv) > 1:
+    cfg = yaml.safe_load(Path(__import__('sys').argv[1]).read_text()) or {}
+
+samba = cfg.get('samba', {})
+workgroup = samba.get('workgroup', 'WORKGROUP')
+server_string = samba.get('server_string', 'Rocky ZFS Appliance')
+shares = samba.get('shares', []) or []
+
+print('[global]')
+print(f'   workgroup = {workgroup}')
+print(f'   server string = {server_string}')
+print('   security = user')
+print('   map to guest = Bad User')
+print('   vfs objects = acl_xattr')
+print('   map acl inherit = yes')
+print('   store dos attributes = yes')
+print('   ea support = yes')
+print('   inherit acls = yes')
+print('   inherit permissions = yes')
+print('   acl_xattr:ignore system acls = yes')
+print('   log file = /var/log/samba/log.%m')
+print('   max log size = 10000')
+print('   load printers = no')
+print('   disable spoolss = yes')
+print('   smb ports = 445')
+print('')
+
+for share in shares:
+    name = share.get('name')
+    path = share.get('path')
+    if not name or not path:
+        continue
+    print(f'[{name}]')
+    print(f'   path = {path}')
+    print(f'   browseable = {str(share.get("browseable", True)).lower()}')
+    print(f'   writable = {str(share.get("writable", True)).lower()}')
+    print(f'   guest ok = {str(share.get("guest_ok", False)).lower()}')
+    for opt in share.get('options', []) or []:
+        print(f'   {opt}')
+    print('')
+PY

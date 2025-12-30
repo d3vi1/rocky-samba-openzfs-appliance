@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="/etc/appliance/config.yml"
+STATE_DIR="/var/lib/appliance"
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+Usage: apply-config [--dry-run]
+USAGE
+}
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=1
+fi
+
+if [[ ! -f "${CONFIG_FILE}" ]]; then
+  echo "[apply-config] Missing ${CONFIG_FILE}" >&2
+  exit 1
+fi
+
+run() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[dry-run] $*"
+  else
+    "$@"
+  fi
+}
+
+config_get() {
+  local key="$1"
+  python3 - <<PY
+import yaml
+from pathlib import Path
+cfg = yaml.safe_load(Path("${CONFIG_FILE}").read_text()) or {}
+parts = "${key}".split(".")
+val = cfg
+for part in parts:
+    if isinstance(val, dict) and part in val:
+        val = val[part]
+    else:
+        val = None
+        break
+if isinstance(val, bool):
+    print(str(val).lower())
+elif val is None:
+    print("")
+else:
+    print(val)
+PY
+}
+
+config_list() {
+  local key="$1"
+  python3 - <<PY
+import yaml
+from pathlib import Path
+cfg = yaml.safe_load(Path("${CONFIG_FILE}").read_text()) or {}
+parts = "${key}".split(".")
+val = cfg
+for part in parts:
+    if isinstance(val, dict) and part in val:
+        val = val[part]
+    else:
+        val = []
+        break
+if val is None:
+    val = []
+if not isinstance(val, list):
+    raise SystemExit(1)
+for item in val:
+    print(item)
+PY
+}
+
+mkdir -p "${STATE_DIR}"
+
+hostname_value="$(config_get system.hostname)"
+timezone_value="$(config_get system.timezone)"
+
+if [[ -n "${hostname_value}" ]]; then
+  run hostnamectl set-hostname "${hostname_value}"
+fi
+
+if [[ -n "${timezone_value}" ]]; then
+  run timedatectl set-timezone "${timezone_value}"
+fi
+
+run systemctl enable --now cockpit.socket sshd firewalld
+
+run firewall-cmd --quiet --add-service=cockpit --permanent
+run firewall-cmd --quiet --add-service=samba --permanent
+run firewall-cmd --quiet --reload
+
+bond_enabled="$(config_get network.bond.enabled)"
+if [[ "${bond_enabled}" == "true" ]]; then
+  bond_name="$(config_get network.bond.name)"
+  bond_name="${bond_name:-bond0}"
+  bond_mode="$(config_get network.bond.mode)"
+  bond_mode="${bond_mode:-802.3ad}"
+  bond_members=()
+  while IFS= read -r member; do
+    bond_members+=("${member}")
+  done < <(config_list network.bond.members)
+
+  if ! nmcli -t -f NAME con show | grep -q "^${bond_name}$"; then
+    run nmcli con add type bond ifname "${bond_name}" con-name "${bond_name}" bond.options "mode=${bond_mode},miimon=100,xmit_hash_policy=layer3+4"
+  fi
+
+  for member in "${bond_members[@]}"; do
+    if ! nmcli -t -f NAME con show | grep -q "^${bond_name}-${member}$"; then
+      run nmcli con add type ethernet ifname "${member}" con-name "${bond_name}-${member}" master "${bond_name}"
+    fi
+  done
+
+  ipaddr="$(config_get network.bond.ipv4.address)"
+  gateway="$(config_get network.bond.ipv4.gateway)"
+  dns_list="$(config_get network.bond.ipv4.dns)"
+
+  if [[ -n "${ipaddr}" ]]; then
+    run nmcli con mod "${bond_name}" ipv4.addresses "${ipaddr}" ipv4.gateway "${gateway}" ipv4.dns "${dns_list}" ipv4.method manual ipv6.method disabled
+    run nmcli con up "${bond_name}"
+  fi
+fi
+
+admin_user="$(config_get admin.username)"
+admin_shell="$(config_get admin.shell)"
+admin_shell="${admin_shell:-/bin/bash}"
+if [[ -n "${admin_user}" ]]; then
+  if ! id "${admin_user}" &>/dev/null; then
+    run useradd -m -s "${admin_shell}" -G wheel "${admin_user}"
+  fi
+  ssh_keys_path="$(config_get admin.ssh_keys_file)"
+  if [[ -n "${ssh_keys_path}" && -f "${ssh_keys_path}" ]]; then
+    run install -d -m 700 "/home/${admin_user}/.ssh"
+    run install -m 600 "${ssh_keys_path}" "/home/${admin_user}/.ssh/authorized_keys"
+    run chown -R "${admin_user}:${admin_user}" "/home/${admin_user}/.ssh"
+  fi
+fi
+
+samba_enabled="$(config_get samba.enabled)"
+if [[ "${samba_enabled}" != "false" ]]; then
+  run /usr/libexec/appliance/render-smb-conf "${CONFIG_FILE}" > /etc/samba/smb.conf
+  run systemctl enable --now smb nmb
+fi
+
+zfs_enabled="$(config_get zfs.enabled)"
+if [[ "${zfs_enabled}" == "true" ]]; then
+  pool_name="$(config_get zfs.pool.name)"
+  if [[ -z "${pool_name}" ]]; then
+    echo "[apply-config] zfs.pool.name is required when zfs.enabled is true" >&2
+    exit 1
+  fi
+  if ! zpool list -H -o name | grep -q "^${pool_name}$"; then
+    run zpool import "${pool_name}" || true
+  fi
+  if ! zpool list -H -o name | grep -q "^${pool_name}$"; then
+    create_pool="$(config_get zfs.pool.create)"
+    if [[ "${create_pool}" == "true" ]]; then
+      vdevs=()
+      while IFS= read -r dev; do
+        vdevs+=("${dev}")
+      done < <(config_list zfs.pool.devices)
+      if [[ "${#vdevs[@]}" -gt 0 ]]; then
+        run zpool create -f -o ashift=12 \
+          -O atime=off \
+          -O xattr=sa \
+          -O acltype=nfs4 \
+          -O aclinherit=passthrough \
+          -O normalization=formD \
+          -O casesensitivity=mixed \
+          -O compression=lz4 \
+          -O dnodesize=auto \
+          "${pool_name}" \
+          raidz2 "${vdevs[@]}"
+      fi
+    else
+      echo "[apply-config] zfs.pool.create is false; skipping pool creation." >&2
+    fi
+  fi
+
+  while IFS= read -r dataset; do
+    ds_name="$(echo "${dataset}" | cut -d: -f1)"
+    ds_mount="$(echo "${dataset}" | cut -d: -f2)"
+    if [[ -n "${ds_name}" && -n "${ds_mount}" ]]; then
+      if ! zfs list -H -o name | grep -q "^${pool_name}/${ds_name}$"; then
+        run zfs create -o mountpoint="${ds_mount}" "${pool_name}/${ds_name}"
+      fi
+    fi
+  done < <(python3 - <<PY
+import yaml
+from pathlib import Path
+cfg = yaml.safe_load(Path("${CONFIG_FILE}").read_text()) or {}
+for ds in cfg.get('zfs', {}).get('datasets', []) or []:
+    name = ds.get('name')
+    mount = ds.get('mountpoint')
+    if name and mount:
+        print(f"{name}:{mount}")
+PY
+  )
+else
+  run zpool import -a || true
+fi

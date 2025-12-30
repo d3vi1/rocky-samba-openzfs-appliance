@@ -1,0 +1,12 @@
+[Unit]
+Description=Appliance first boot configuration
+ConditionPathExists=!/etc/appliance/firstboot.done
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/appliance/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target
