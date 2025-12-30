@@ -1,0 +1,6 @@
+[submodule "vendor/45drives/cockpit-zfs"]
+	path = vendor/45drives/cockpit-zfs
+	url = https://github.com/45Drives/cockpit-zfs.git
+[submodule "vendor/45drives/cockpit-file-sharing"]
+	path = vendor/45drives/cockpit-file-sharing
+	url = https://github.com/45Drives/cockpit-file-sharing.git
