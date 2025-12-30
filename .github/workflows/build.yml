@@ -1,0 +1,34 @@
+name: Build and Push Image
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Build image
+        env:
+          IMAGE_NAME: ghcr.io/d3vi1/rocky-samba-openzfs-appliance
+          IMAGE_TAG: ${{ github.sha }}
+        run: make build
+      - name: Verify image
+        env:
+          IMAGE_NAME: ghcr.io/d3vi1/rocky-samba-openzfs-appliance
+          IMAGE_TAG: ${{ github.sha }}
+        run: make verify
+      - name: Push image
+        env:
+          IMAGE_NAME: ghcr.io/d3vi1/rocky-samba-openzfs-appliance
+          IMAGE_TAG: ${{ github.sha }}
+        run: make push

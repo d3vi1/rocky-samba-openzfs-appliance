@@ -1,0 +1,11 @@
+/var/log/samba/log.* {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    sharedscripts
+    postrotate
+        /bin/systemctl reload smb nmb >/dev/null 2>&1 || true
+    endscript
+}
